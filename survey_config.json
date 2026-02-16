@@ -1,10 +1,11 @@
 {
-    "title": "Идёшь играть СГ на этой неделе?",
+    "title": "What's your favorite collor?",
     "options": [
-      "1ая ПТ",
-      "2ая ПТ",
-      "1ая ПТ",
-      "2ая ПТ"
+      "Red",
+      "Green",
+      "Blue",
+      "White",
+      "Black"
     ],
     "start": "2026-02-16T12:00:00",
     "end": "2026-02-18T20:00:00",
