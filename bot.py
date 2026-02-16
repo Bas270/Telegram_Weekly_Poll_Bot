@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from typing import Optional
 
 from telegram import Update, Poll
 from telegram.error import TelegramError
@@ -59,18 +60,20 @@ class BotConfig:
     """Complete bot configuration."""
     survey: SurveyConfig
     schedule: ScheduleConfig
+    thread_id: Optional[int] = None  # Topic/thread ID for Telegram groups
 
 
 # ================== CONFIG LOADING FUNCTIONS ==================
 
-def load_vault(path: Path) -> tuple[str, int]:
+def load_vault(path: Path) -> tuple[str, int, Optional[int]]:
     """
-    Load secrets (bot token, chat id) from vault.json.
+    Load secrets (bot token, chat id, optional thread id) from vault.json.
 
     vault.json schema:
     {
       "TELEGRAM_BOT_TOKEN": "...",
-      "TELEGRAM_TARGET_CHAT_ID": "-1001234567890"
+      "TELEGRAM_TARGET_CHAT_ID": "-1001234567890",
+      "TELEGRAM_THREAD_ID": 12345  // Optional
     }
     """
     if not path.exists():
@@ -86,13 +89,23 @@ def load_vault(path: Path) -> tuple[str, int]:
 
     token = data.get("TELEGRAM_BOT_TOKEN")
     chat_id = data.get("TELEGRAM_TARGET_CHAT_ID")
+    thread_id = data.get("TELEGRAM_THREAD_ID")  # Optional
 
     if not token or not chat_id:
         raise RuntimeError(
             "Vault file must contain TELEGRAM_BOT_TOKEN and TELEGRAM_TARGET_CHAT_ID"
         )
 
-    return token, int(chat_id)
+    # Validate thread_id if provided
+    if thread_id is not None:
+        try:
+            thread_id = int(thread_id)
+            if thread_id <= 0:
+                raise ValueError("TELEGRAM_THREAD_ID must be a positive integer")
+        except (ValueError, TypeError) as e:
+            raise ValueError(f"Invalid TELEGRAM_THREAD_ID: must be a positive integer") from e
+
+    return token, int(chat_id), thread_id
 
 
 def _parse_day(name: str) -> int:
@@ -117,7 +130,7 @@ def _parse_hhmm(hhmm: str) -> tuple[int, int]:
     return h, m
 
 
-def load_bot_config(path: Path) -> BotConfig:
+def load_bot_config(path: Path, thread_id_from_vault: Optional[int] = None) -> BotConfig:
     """
     Load complete bot configuration from bot_config.json.
 
@@ -133,7 +146,8 @@ def load_bot_config(path: Path) -> BotConfig:
         "stop_day": "Thursday",
         "stop_time": "20:00",
         "timezone": "Europe/Berlin"
-      }
+      },
+      "thread_id": 12345  // Optional, can also be in vault.json
     }
     """
     if not path.exists():
@@ -217,16 +231,33 @@ def load_bot_config(path: Path) -> BotConfig:
         timezone=tz,
     )
 
-    return BotConfig(survey=survey_config, schedule=schedule_config)
+    # Get thread_id from config file or vault (vault takes precedence)
+    thread_id = thread_id_from_vault
+    if thread_id is None:
+        thread_id_raw = raw.get("thread_id")
+        if thread_id_raw is not None:
+            try:
+                thread_id = int(thread_id_raw)
+                if thread_id <= 0:
+                    raise ValueError("thread_id must be a positive integer")
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"bot_config.json: Invalid thread_id - must be a positive integer") from e
+
+    return BotConfig(
+        survey=survey_config,
+        schedule=schedule_config,
+        thread_id=thread_id,
+    )
 
 
 # ================== LOAD CONFIGURATION ==================
 
 try:
-    TELEGRAM_BOT_TOKEN, TARGET_CHAT_ID = load_vault(VAULT_PATH)
-    BOT_CONFIG = load_bot_config(BOT_CONFIG_PATH)
+    TELEGRAM_BOT_TOKEN, TARGET_CHAT_ID, THREAD_ID_FROM_VAULT = load_vault(VAULT_PATH)
+    BOT_CONFIG = load_bot_config(BOT_CONFIG_PATH, thread_id_from_vault=THREAD_ID_FROM_VAULT)
     SURVEY_CONFIG = BOT_CONFIG.survey
     SCHEDULE_CONFIG = BOT_CONFIG.schedule
+    THREAD_ID = BOT_CONFIG.thread_id
     TIMEZONE = SCHEDULE_CONFIG.timezone
 except Exception as e:
     logging.basicConfig(level=logging.ERROR)
@@ -268,20 +299,35 @@ def _next_weekday_time(
 # ================== HANDLERS & JOBS ==================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Simple /start command: shows chat id and current schedule."""
+    """Simple /start command: shows chat id, thread id, and current schedule."""
     chat = update.effective_chat
+    thread_info = ""
+    
+    # Show thread ID if message is in a thread
+    if update.message and update.message.message_thread_id:
+        thread_info = f"\nCurrent thread ID: {update.message.message_thread_id}"
+    
     text = (
         "Hi, I'm the weekly poll bot.\n"
-        f"This chat id is: {chat.id}\n\n"
+        f"This chat id is: {chat.id}{thread_info}\n\n"
         "Current schedule (from bot_config.json):\n"
         f"- Start: {list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.start_weekday].capitalize()} "
         f"{SCHEDULE_CONFIG.start_hour:02d}:{SCHEDULE_CONFIG.start_minute:02d}\n"
         f"- Stop:  {list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.stop_weekday].capitalize()} "
         f"{SCHEDULE_CONFIG.stop_hour:02d}:{SCHEDULE_CONFIG.stop_minute:02d}\n"
-        f"- Timezone: {TIMEZONE}\n\n"
-        f"Survey title: {SURVEY_CONFIG.title}\n"
+        f"- Timezone: {TIMEZONE}\n"
+    )
+    
+    if THREAD_ID is not None:
+        text += f"\nConfigured thread ID: {THREAD_ID} (polls will be sent to this thread)"
+    else:
+        text += "\nNo thread ID configured (polls will be sent to main thread)"
+    
+    text += (
+        f"\n\nSurvey title: {SURVEY_CONFIG.title}\n"
         f"Options: {', '.join(SURVEY_CONFIG.options)}"
     )
+    
     await update.message.reply_text(text)
 
 
@@ -295,22 +341,57 @@ async def publish_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = TARGET_CHAT_ID
 
     try:
+        # Log thread information
+        thread_info = f"thread {THREAD_ID}" if THREAD_ID else "main thread"
         logger.info(
-            "Publishing weekly poll to chat %s at %s",
+            "Publishing weekly poll to chat %s (%s) at %s",
             chat_id,
+            thread_info,
             datetime.now(TIMEZONE).isoformat(),
         )
-        message = await bot.send_poll(
-            chat_id=chat_id,
-            question=SURVEY_CONFIG.title,
-            options=SURVEY_CONFIG.options,
-            is_anonymous=False,            # non-anonymous
-            allows_multiple_answers=True,  # multi-select per user
-            type=Poll.REGULAR,
+        
+        # Prepare poll parameters
+        poll_params = {
+            "chat_id": chat_id,
+            "question": SURVEY_CONFIG.title,
+            "options": SURVEY_CONFIG.options,
+            "is_anonymous": False,
+            "allows_multiple_answers": True,
+            "type": Poll.REGULAR,
+        }
+        
+        # Add thread_id only if configured (None = main thread)
+        if THREAD_ID is not None:
+            poll_params["message_thread_id"] = THREAD_ID
+            logger.debug("Using thread ID: %s", THREAD_ID)
+        else:
+            logger.debug("No thread ID configured, sending to main thread")
+        
+        # Send poll
+        message = await bot.send_poll(**poll_params)
+        
+        logger.info(
+            "Poll sent successfully: message_id=%s, chat_id=%s, thread_id=%s",
+            message.message_id,
+            chat_id,
+            THREAD_ID or "main",
         )
+        
     except TelegramError as e:
-        logger.exception("Failed to send poll: %s", e)
+        error_msg = str(e)
+        
+        # Check for thread-related errors
+        if "message_thread_id" in error_msg.lower() or "thread" in error_msg.lower():
+            logger.error(
+                "Failed to send poll to thread %s: %s. "
+                "Verify that the thread ID is correct and the bot has permission to post in that thread.",
+                THREAD_ID,
+                error_msg,
+            )
+        else:
+            logger.exception("Failed to send poll: %s", e)
         return
+        
     except Exception as e:
         logger.exception("Unexpected error while sending poll: %s", e)
         return
@@ -346,6 +427,7 @@ async def publish_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
             "chat_id": chat_id,
             "message_id": message.message_id,
             "poll_id": message.poll.id,
+            "thread_id": THREAD_ID,  # Store thread_id for closing
         },
         name=f"close_poll_{message.message_id}",
     )
@@ -356,19 +438,31 @@ async def close_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
     data = context.job.data or {}
     chat_id = data.get("chat_id")
     message_id = data.get("message_id")
+    thread_id = data.get("thread_id")  # May be None for main thread
 
     if chat_id is None or message_id is None:
         logger.error("close_poll job missing chat_id or message_id in job data.")
         return
 
     try:
+        thread_info = f"thread {thread_id}" if thread_id else "main thread"
         logger.info(
-            "Closing poll in chat %s (message %s) at %s",
+            "Closing poll in chat %s (message %s, %s) at %s",
             chat_id,
             message_id,
+            thread_info,
             datetime.now(TIMEZONE).isoformat(),
         )
+        
+        # stop_poll doesn't need message_thread_id, it uses message_id which is unique
         await context.bot.stop_poll(chat_id=chat_id, message_id=message_id)
+        
+        logger.info(
+            "Poll closed successfully: message_id=%s, chat_id=%s",
+            message_id,
+            chat_id,
+        )
+        
     except TelegramError as e:
         logger.exception("Failed to close poll: %s", e)
     except Exception as e:
@@ -431,6 +525,11 @@ async def main() -> None:
         SURVEY_CONFIG.title,
         SURVEY_CONFIG.options,
     )
+    
+    if THREAD_ID is not None:
+        logger.info("  Thread ID: %s (polls will be sent to this thread)", THREAD_ID)
+    else:
+        logger.info("  Thread ID: Not configured (polls will be sent to main thread)")
 
     # Manual lifecycle (no run_polling)
     await application.initialize()
