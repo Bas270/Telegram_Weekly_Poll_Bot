@@ -1,0 +1,20 @@
+{
+  "survey": {
+    "title": "Weekly check-in: how are you planning to contribute this week?",
+    "options": [
+      "Code review",
+      "New feature development",
+      "Bug fixing",
+      "Writing documentation",
+      "Testing / QA",
+      "Planning / meetings"
+    ]
+  },
+  "schedule": {
+    "start_day": "Tuesday",
+    "start_time": "12:00",
+    "stop_day": "Thursday",
+    "stop_time": "20:00",
+    "timezone": "Europe/Berlin"
+  }
+}
