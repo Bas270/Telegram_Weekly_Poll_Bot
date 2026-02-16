@@ -7,21 +7,21 @@ Welcome! This collection of guides will help you install and run projects from G
 ## Which Guide Should I Use?
 
 ### 🆕 **New to Terminal/Linux?**
-👉 Start with **[BEGINNER_GUIDE.md](BEGINNER_GUIDE.md)**
+👉 Start with **[BEGINNER_GUIDE.md](beginner_guide.md)**
 - Complete step-by-step instructions
 - Explains every term in simple language
 - Includes troubleshooting section
 - Best for: First-time users
 
 ### 📋 **Need Quick Commands?**
-👉 Use **[QUICK_REFERENCE.md](QUICK_REFERENCE.md)**
+👉 Use **[QUICK_REFERENCE.md](quick_reference.md)**
 - Cheat sheet of common commands
 - Quick troubleshooting tips
 - Print-friendly format
 - Best for: Quick lookups
 
 ### 🎯 **Visual Learner?**
-👉 Check **[VISUAL_GUIDE.md](VISUAL_GUIDE.md)**
+👉 Check **[VISUAL_GUIDE.md](visual_guide.md)**
 - Flowcharts and decision trees
 - Visual step-by-step guides
 - Command breakdowns
