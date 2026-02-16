@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram Weekly Poll Bot Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/Telegram_Weekly_Poll_Bot
+Environment="PATH=/root/Telegram_Weekly_Poll_Bot/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/root/Telegram_Weekly_Poll_Bot/venv/bin/python3 /root/Telegram_Weekly_Poll_Bot/bot.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
