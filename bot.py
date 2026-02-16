@@ -19,7 +19,7 @@ from telegram.ext import (
 
 BASE_DIR = Path(__file__).resolve().parent
 VAULT_PATH = BASE_DIR / "vault.json"
-SCHEDULE_CONFIG_PATH = BASE_DIR / "schedule_config.json"
+BOT_CONFIG_PATH = BASE_DIR / "bot_config.json"
 
 
 # ================== CONFIG MODELS ==================
@@ -36,8 +36,15 @@ DAY_NAME_TO_INT = {
 
 
 @dataclass
+class SurveyConfig:
+    """Survey content configuration."""
+    title: str
+    options: list[str]
+
+
+@dataclass
 class ScheduleConfig:
-    """Scheduling parameters loaded from schedule_config.json."""
+    """Scheduling parameters."""
     start_weekday: int  # 0 = Monday ... 6 = Sunday
     start_hour: int
     start_minute: int
@@ -46,6 +53,15 @@ class ScheduleConfig:
     stop_minute: int
     timezone: ZoneInfo
 
+
+@dataclass
+class BotConfig:
+    """Complete bot configuration."""
+    survey: SurveyConfig
+    schedule: ScheduleConfig
+
+
+# ================== CONFIG LOADING FUNCTIONS ==================
 
 def load_vault(path: Path) -> tuple[str, int]:
     """
@@ -60,8 +76,13 @@ def load_vault(path: Path) -> tuple[str, int]:
     if not path.exists():
         raise RuntimeError(f"Vault file not found: {path}")
 
-    with path.open("r", encoding="utf-8") as f:
-        data = json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON in vault file: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Error reading vault file: {e}") from e
 
     token = data.get("TELEGRAM_BOT_TOKEN")
     chat_id = data.get("TELEGRAM_TARGET_CHAT_ID")
@@ -75,64 +96,118 @@ def load_vault(path: Path) -> tuple[str, int]:
 
 
 def _parse_day(name: str) -> int:
+    """Parse day name to weekday integer (0=Monday, 6=Sunday)."""
     try:
         return DAY_NAME_TO_INT[name.strip().lower()]
-    except (KeyError, AttributeError):
+    except (KeyError, AttributeError) as e:
         valid = ", ".join(d.capitalize() for d in DAY_NAME_TO_INT.keys())
-        raise ValueError(f"Invalid day name '{name}'. Must be one of: {valid}")
+        raise ValueError(f"Invalid day name '{name}'. Must be one of: {valid}") from e
 
 
 def _parse_hhmm(hhmm: str) -> tuple[int, int]:
+    """Parse HH:MM time string to (hour, minute) tuple."""
     try:
         h_str, m_str = hhmm.split(":", 1)
         h, m = int(h_str), int(m_str)
-    except Exception:
-        raise ValueError(f"Invalid time format '{hhmm}'. Expected 'HH:MM'.")
+    except ValueError as e:
+        raise ValueError(f"Invalid time format '{hhmm}'. Expected 'HH:MM'.") from e
 
     if not (0 <= h <= 23 and 0 <= m <= 59):
-        raise ValueError(f"Invalid time '{hhmm}'. Hour 0–23, minute 0–59.")
+        raise ValueError(f"Invalid time '{hhmm}'. Hour must be 0-23, minute must be 0-59.")
     return h, m
 
 
-def load_schedule_config(path: Path) -> ScheduleConfig:
+def load_bot_config(path: Path) -> BotConfig:
     """
-    Load schedule from JSON.
+    Load complete bot configuration from bot_config.json.
 
-    schedule_config.json schema:
+    bot_config.json schema:
     {
-      "start_day": "Tuesday",
-      "start_time": "12:00",
-      "stop_day": "Thursday",
-      "stop_time": "20:00",
-      "timezone": "Europe/Berlin"
+      "survey": {
+        "title": "Survey question text",
+        "options": ["Option 1", "Option 2", ...]
+      },
+      "schedule": {
+        "start_day": "Tuesday",
+        "start_time": "12:00",
+        "stop_day": "Thursday",
+        "stop_time": "20:00",
+        "timezone": "Europe/Berlin"
+      }
     }
     """
     if not path.exists():
-        raise RuntimeError(f"Schedule config file not found: {path}")
+        raise RuntimeError(f"Bot config file not found: {path}")
 
-    with path.open("r", encoding="utf-8") as f:
-        raw = json.load(f)
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            raw = json.load(f)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Invalid JSON in bot config file: {e}") from e
+    except Exception as e:
+        raise RuntimeError(f"Error reading bot config file: {e}") from e
 
-    start_day = raw.get("start_day")
-    start_time = raw.get("start_time")
-    stop_day = raw.get("stop_day")
-    stop_time = raw.get("stop_time")
-    tz_name = raw.get("timezone", "Europe/Berlin")
+    # Validate and parse survey section
+    survey_raw = raw.get("survey")
+    if not survey_raw:
+        raise ValueError("bot_config.json must contain 'survey' section")
+    
+    survey_title = survey_raw.get("title")
+    survey_options = survey_raw.get("options", [])
+
+    if not survey_title or not isinstance(survey_title, str):
+        raise ValueError("bot_config.json: 'survey.title' must be a non-empty string")
+    
+    if not isinstance(survey_options, list):
+        raise ValueError("bot_config.json: 'survey.options' must be a list")
+    
+    if len(survey_options) < 2:
+        raise ValueError("bot_config.json: 'survey.options' must contain at least 2 options")
+    
+    if len(survey_options) > 10:
+        raise ValueError("bot_config.json: 'survey.options' must contain at most 10 options")
+    
+    # Validate all options are strings
+    for i, option in enumerate(survey_options):
+        if not isinstance(option, str) or not option.strip():
+            raise ValueError(f"bot_config.json: 'survey.options[{i}]' must be a non-empty string")
+
+    survey_config = SurveyConfig(
+        title=survey_title.strip(),
+        options=[opt.strip() for opt in survey_options],
+    )
+
+    # Validate and parse schedule section
+    schedule_raw = raw.get("schedule")
+    if not schedule_raw:
+        raise ValueError("bot_config.json must contain 'schedule' section")
+
+    start_day = schedule_raw.get("start_day")
+    start_time = schedule_raw.get("start_time")
+    stop_day = schedule_raw.get("stop_day")
+    stop_time = schedule_raw.get("stop_time")
+    tz_name = schedule_raw.get("timezone", "Europe/Berlin")
 
     if not start_day or not start_time or not stop_day or not stop_time:
         raise ValueError(
-            "schedule_config.json must define 'start_day', 'start_time', "
-            "'stop_day', and 'stop_time'."
+            "bot_config.json: 'schedule' section must define 'start_day', 'start_time', "
+            "'stop_day', and 'stop_time'"
         )
 
-    start_weekday = _parse_day(start_day)
-    stop_weekday = _parse_day(stop_day)
-    start_hour, start_minute = _parse_hhmm(start_time)
-    stop_hour, stop_minute = _parse_hhmm(stop_time)
+    try:
+        start_weekday = _parse_day(start_day)
+        stop_weekday = _parse_day(stop_day)
+        start_hour, start_minute = _parse_hhmm(start_time)
+        stop_hour, stop_minute = _parse_hhmm(stop_time)
+    except ValueError as e:
+        raise ValueError(f"bot_config.json: Invalid schedule format - {e}") from e
 
-    tz = ZoneInfo(tz_name)
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception as e:
+        raise ValueError(f"bot_config.json: Invalid timezone '{tz_name}': {e}") from e
 
-    return ScheduleConfig(
+    schedule_config = ScheduleConfig(
         start_weekday=start_weekday,
         start_hour=start_hour,
         start_minute=start_minute,
@@ -142,25 +217,21 @@ def load_schedule_config(path: Path) -> ScheduleConfig:
         timezone=tz,
     )
 
-
-# ================== LOAD VAULT & SCHEDULE ==================
-
-TELEGRAM_BOT_TOKEN, TARGET_CHAT_ID = load_vault(VAULT_PATH)
-SCHEDULE_CONFIG = load_schedule_config(SCHEDULE_CONFIG_PATH)
-TIMEZONE = SCHEDULE_CONFIG.timezone
+    return BotConfig(survey=survey_config, schedule=schedule_config)
 
 
-# ================== SURVEY CONTENT ==================
+# ================== LOAD CONFIGURATION ==================
 
-POLL_QUESTION = "Weekly check-in: how are you planning to contribute this week?"
-POLL_OPTIONS = [
-    "Code review",
-    "New feature development",
-    "Bug fixing",
-    "Writing documentation",
-    "Testing / QA",
-    "Planning / meetings",
-]
+try:
+    TELEGRAM_BOT_TOKEN, TARGET_CHAT_ID = load_vault(VAULT_PATH)
+    BOT_CONFIG = load_bot_config(BOT_CONFIG_PATH)
+    SURVEY_CONFIG = BOT_CONFIG.survey
+    SCHEDULE_CONFIG = BOT_CONFIG.schedule
+    TIMEZONE = SCHEDULE_CONFIG.timezone
+except Exception as e:
+    logging.basicConfig(level=logging.ERROR)
+    logging.error(f"Failed to load configuration: {e}")
+    raise
 
 
 # ================== LOGGING ==================
@@ -202,12 +273,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "Hi, I'm the weekly poll bot.\n"
         f"This chat id is: {chat.id}\n\n"
-        "Current schedule (from schedule_config.json):\n"
+        "Current schedule (from bot_config.json):\n"
         f"- Start: {list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.start_weekday].capitalize()} "
         f"{SCHEDULE_CONFIG.start_hour:02d}:{SCHEDULE_CONFIG.start_minute:02d}\n"
         f"- Stop:  {list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.stop_weekday].capitalize()} "
         f"{SCHEDULE_CONFIG.stop_hour:02d}:{SCHEDULE_CONFIG.stop_minute:02d}\n"
-        f"- Timezone: {TIMEZONE}"
+        f"- Timezone: {TIMEZONE}\n\n"
+        f"Survey title: {SURVEY_CONFIG.title}\n"
+        f"Options: {', '.join(SURVEY_CONFIG.options)}"
     )
     await update.message.reply_text(text)
 
@@ -229,8 +302,8 @@ async def publish_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         message = await bot.send_poll(
             chat_id=chat_id,
-            question=POLL_QUESTION,
-            options=POLL_OPTIONS,
+            question=SURVEY_CONFIG.title,
+            options=SURVEY_CONFIG.options,
             is_anonymous=False,            # non-anonymous
             allows_multiple_answers=True,  # multi-select per user
             type=Poll.REGULAR,
@@ -313,7 +386,7 @@ async def main() -> None:
     """
     Build the application, register handlers, and start polling.
 
-    The survey start/stop schedule is entirely driven by schedule_config.json.
+    The survey content and schedule are entirely driven by bot_config.json.
     """
     application = (
         Application.builder()
@@ -341,7 +414,10 @@ async def main() -> None:
     )
 
     logger.info(
-        "Starting bot with schedule: start_day=%s %02d:%02d, stop_day=%s %02d:%02d, tz=%s",
+        "Starting bot with configuration from bot_config.json:"
+    )
+    logger.info(
+        "  Schedule: start_day=%s %02d:%02d, stop_day=%s %02d:%02d, tz=%s",
         list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.start_weekday].capitalize(),
         SCHEDULE_CONFIG.start_hour,
         SCHEDULE_CONFIG.start_minute,
@@ -349,6 +425,11 @@ async def main() -> None:
         SCHEDULE_CONFIG.stop_hour,
         SCHEDULE_CONFIG.stop_minute,
         TIMEZONE,
+    )
+    logger.info(
+        "  Survey: title='%s', options=%s",
+        SURVEY_CONFIG.title,
+        SURVEY_CONFIG.options,
     )
 
     # Manual lifecycle (no run_polling)
