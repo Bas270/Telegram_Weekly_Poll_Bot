@@ -1,4 +1,5 @@
 {
     "TELEGRAM_BOT_TOKEN": "please_insert_bot_token",
-    "TELEGRAM_TARGET_CHAT_ID": "please_insert_chat_id_or_threadid"
+    "TELEGRAM_TARGET_CHAT_ID": "please_insert_chat_id_or_threadid",
+    "TELEGRAM_THREAD_ID": please_insert_thread_id
   }
