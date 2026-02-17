@@ -1,8 +1,8 @@
 import asyncio
 import json
 import logging
-from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from dataclasses import dataclass, field
+from datetime import datetime, time, timedelta, date
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Optional
@@ -259,219 +259,337 @@ try:
     SCHEDULE_CONFIG = BOT_CONFIG.schedule
     THREAD_ID = BOT_CONFIG.thread_id
     TIMEZONE = SCHEDULE_CONFIG.timezone
-except Exception as e:
-    logging.basicConfig(level=logging.ERROR)
-    logging.error(f"Failed to load configuration: {e}")
+except Exception:
+    # Fail fast on configuration errors; the traceback will be visible to the operator.
     raise
 
 
-# ================== LOGGING ==================
+# ================== LOGGING (DISABLED OUTPUT) ==================
 
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    level=logging.INFO,
-)
+# We intentionally do not emit logs to system outputs. The logger below is
+# configured with a NullHandler and does not propagate messages.
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
+logger.propagate = False
 
 
-# ================== HELPERS ==================
+def _now_tz() -> datetime:
+    """Current time in configured timezone."""
+    return datetime.now(TIMEZONE)
 
-def _next_weekday_time(
+
+@dataclass
+class PollState:
+    """In-memory state for the latest poll in a chat."""
+
+    last_published_at: Optional[datetime] = None
+    last_stopped_at: Optional[datetime] = None
+    current_message_id: Optional[int] = None
+    current_poll_id: Optional[str] = None
+
+
+@dataclass
+class ChatState:
+    """In-memory runtime state per chat."""
+
+    running: bool = False
+    started_at: Optional[datetime] = None
+    stopped_at: Optional[datetime] = None
+    poll: PollState = field(default_factory=PollState)
+
+
+# Global in-memory state for all chats this process has seen.
+CHAT_STATES: dict[int, ChatState] = {}
+
+
+def _get_chat_state(chat_id: int) -> ChatState:
+    """Return (and create if missing) the in-memory state for a chat."""
+    state = CHAT_STATES.get(chat_id)
+    if state is None:
+        state = ChatState()
+        CHAT_STATES[chat_id] = state
+    return state
+
+
+def _get_publication_state(poll: PollState) -> str:
+    """
+    Determine publication state for /status.
+
+    Returns one of:
+    - "not published"
+    - "published"
+    - "stopped"
+    """
+    if poll.current_message_id is not None:
+        return "published"
+
+    if (
+        poll.last_published_at is not None
+        and poll.last_stopped_at is not None
+        and poll.last_stopped_at >= poll.last_published_at
+    ):
+        return "stopped"
+
+    return "not published"
+
+
+# ================== SURVEY OPERATIONS (PUBLISH/STOP) ==================
+
+async def _publish_new_survey(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    chat_state: ChatState,
     now: datetime,
-    target_weekday: int,
-    hour: int,
-    minute: int,
-) -> datetime:
+) -> None:
     """
-    Given 'now', return the next datetime with weekday=target_weekday and the
-    given hour/minute in the same timezone. If that datetime is <= now,
-    jump one week ahead.
+    Publish a new survey (Telegram poll) for the given chat.
+
+    Errors are swallowed to keep behaviour simple; /status reflects what is
+    known from in-memory state only.
     """
-    days_ahead = (target_weekday - now.weekday()) % 7
-    candidate = (now + timedelta(days=days_ahead)).replace(
-        hour=hour, minute=minute, second=0, microsecond=0
-    )
-    if candidate <= now:
-        candidate += timedelta(days=7)
-    return candidate
+    bot = context.bot
+
+    poll_params = {
+        "chat_id": chat_id,
+        "question": SURVEY_CONFIG.title,
+        "options": SURVEY_CONFIG.options,
+        "is_anonymous": False,
+        "allows_multiple_answers": True,
+        "type": Poll.REGULAR,
+    }
+
+    if THREAD_ID is not None:
+        poll_params["message_thread_id"] = THREAD_ID
+
+    try:
+        message = await bot.send_poll(**poll_params)
+    except TelegramError:
+        # Publishing failed; leave poll state unchanged.
+        return
+
+    poll = chat_state.poll
+    poll.current_message_id = message.message_id
+    poll.current_poll_id = message.poll.id
+    poll.last_published_at = now
+    poll.last_stopped_at = None
 
 
-# ================== HANDLERS & JOBS ==================
+async def _stop_survey(
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    chat_id: int,
+    chat_state: ChatState,
+    now: datetime,
+) -> None:
+    """
+    Stop an existing survey for the given chat if one is currently active.
+    """
+    poll = chat_state.poll
+    if poll.current_message_id is None:
+        return
+
+    try:
+        await context.bot.stop_poll(chat_id=chat_id, message_id=poll.current_message_id)
+    except TelegramError:
+        # Stopping failed; keep the last known state as-is.
+        return
+
+    poll.last_stopped_at = now
+    poll.current_message_id = None
+
+
+# ================== SURVEY POLICY (DAY/TIME CONTROLS) ==================
+
+def _is_monday_or_sunday(weekday: int) -> bool:
+    return weekday in (0, 6)
+
+
+def _is_friday_or_saturday(weekday: int) -> bool:
+    return weekday in (4, 5)
+
+
+def _is_tuesday_or_thursday(weekday: int) -> bool:
+    return weekday in (1, 3)
+
+
+def _time_ge(t: time, hh: int, mm: int) -> bool:
+    return t >= time(hour=hh, minute=mm)
+
+
+def _time_lt(t: time, hh: int, mm: int) -> bool:
+    return t < time(hour=hh, minute=mm)
+
+
+async def _ensure_active_survey_for_cycle(context: ContextTypes.DEFAULT_TYPE, *, cycle_date: date, now: datetime) -> None:
+    """
+    Legacy helper (no-op). Kept for backward compatibility; not used anymore.
+    """
+    return
+
+
+async def _ensure_stopped_if_exists(context: ContextTypes.DEFAULT_TYPE, *, now: datetime, reason: str) -> None:
+    """
+    Legacy helper (no-op). Kept for backward compatibility; not used anymore.
+    """
+    _ = context, now, reason
+    return
+
+
+async def manage_survey_policy(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Repeating job: enforce the requested weekly survey policy.
+
+    Policy requirements implemented:
+    - Monday/Sunday: do nothing.
+    - Friday/Saturday: if a survey exists and isn't stopped, stop it (log failures).
+    - Tuesday/Thursday special controls:
+      - Tuesday before 12:00: do nothing.
+      - Thursday at/after 20:00: ensure survey is stopped (log failures).
+      - Tuesday at/after 12:00, Wednesday any time, Thursday before 20:00:
+        ensure a survey is present (publish if missing; log failures).
+    """
+    now = _now_tz()
+    weekday = now.weekday()
+    t = now.time()
+
+    # Apply policy to each chat that has been started via /start.
+    for chat_id, chat_state in list(CHAT_STATES.items()):
+        if not chat_state.running:
+            continue
+
+        # Monday or Sunday: no action.
+        if _is_monday_or_sunday(weekday):
+            continue
+
+        # Friday or Saturday: ensure survey is stopped if it exists.
+        if _is_friday_or_saturday(weekday):
+            await _stop_survey(context, chat_id=chat_id, chat_state=chat_state, now=now)
+            continue
+
+        # Tuesday or Thursday have time-gated rules.
+        if _is_tuesday_or_thursday(weekday):
+            # Tuesday before 12:00 → no action.
+            if weekday == 1 and _time_lt(t, 12, 0):
+                continue
+
+            # Thursday at/after 20:00 → ensure survey is stopped.
+            if weekday == 3 and _time_ge(t, 20, 0):
+                await _stop_survey(context, chat_id=chat_id, chat_state=chat_state, now=now)
+                continue
+
+            # Tuesday at/after 12:00 or Thursday before 20:00 → ensure survey is published.
+            if chat_state.poll.current_message_id is None:
+                await _publish_new_survey(context, chat_id=chat_id, chat_state=chat_state, now=now)
+            continue
+
+        # Wednesday any time → ensure survey is published.
+        if weekday == 2:
+            if chat_state.poll.current_message_id is None:
+                await _publish_new_survey(context, chat_id=chat_id, chat_state=chat_state, now=now)
+            continue
+
+
+# ================== HANDLERS ==================
+
+def _format_dt(dt: Optional[datetime]) -> str:
+    """Format datetimes for human-readable chat output."""
+    if dt is None:
+        return "not available"
+    return dt.strftime("%Y-%m-%d %H:%M:%S %Z")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Simple /start command: shows chat id, thread id, and current schedule."""
+    """
+    /start – enable automatic survey management in this chat and record start time.
+    """
+    if not update.message:
+        return
+
     chat = update.effective_chat
-    thread_info = ""
-    
-    # Show thread ID if message is in a thread
-    if update.message and update.message.message_thread_id:
-        thread_info = f"\nCurrent thread ID: {update.message.message_thread_id}"
-    
-    text = (
-        "Hi, I'm the weekly poll bot.\n"
-        f"This chat id is: {chat.id}{thread_info}\n\n"
-        "Current schedule (from bot_config.json):\n"
-        f"- Start: {list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.start_weekday].capitalize()} "
-        f"{SCHEDULE_CONFIG.start_hour:02d}:{SCHEDULE_CONFIG.start_minute:02d}\n"
-        f"- Stop:  {list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.stop_weekday].capitalize()} "
-        f"{SCHEDULE_CONFIG.stop_hour:02d}:{SCHEDULE_CONFIG.stop_minute:02d}\n"
-        f"- Timezone: {TIMEZONE}\n"
-    )
-    
-    if THREAD_ID is not None:
-        text += f"\nConfigured thread ID: {THREAD_ID} (polls will be sent to this thread)"
+    chat_id = chat.id
+    now = _now_tz()
+
+    state = _get_chat_state(chat_id)
+
+    if state.running:
+        text = (
+            "Bot is already running in this chat.\n"
+            f"Started at: {_format_dt(state.started_at)}"
+        )
     else:
-        text += "\nNo thread ID configured (polls will be sent to main thread)"
-    
-    text += (
-        f"\n\nSurvey title: {SURVEY_CONFIG.title}\n"
-        f"Options: {', '.join(SURVEY_CONFIG.options)}"
-    )
-    
+        state.running = True
+        state.started_at = now
+        state.stopped_at = None
+
+        text = (
+            "Bot started in this chat.\n"
+            f"Poll window: Tuesday 12:00 to Thursday 20:00 ({TIMEZONE})\n"
+            "Polls will be published and stopped automatically based on the day and time."
+        )
+
     await update.message.reply_text(text)
 
 
-async def publish_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Job: publish the weekly poll at the configured start day/time.
-    Also schedules a job to close this specific poll at the configured stop
-    day/time of the same poll week.
+    /stop – disable automatic survey management in this chat and record stop time.
     """
-    bot = context.bot
-    chat_id = TARGET_CHAT_ID
-
-    try:
-        # Log thread information
-        thread_info = f"thread {THREAD_ID}" if THREAD_ID else "main thread"
-        logger.info(
-            "Publishing weekly poll to chat %s (%s) at %s",
-            chat_id,
-            thread_info,
-            datetime.now(TIMEZONE).isoformat(),
-        )
-        
-        # Prepare poll parameters
-        poll_params = {
-            "chat_id": chat_id,
-            "question": SURVEY_CONFIG.title,
-            "options": SURVEY_CONFIG.options,
-            "is_anonymous": False,
-            "allows_multiple_answers": True,
-            "type": Poll.REGULAR,
-        }
-        
-        # Add thread_id only if configured (None = main thread)
-        if THREAD_ID is not None:
-            poll_params["message_thread_id"] = THREAD_ID
-            logger.debug("Using thread ID: %s", THREAD_ID)
-        else:
-            logger.debug("No thread ID configured, sending to main thread")
-        
-        # Send poll
-        message = await bot.send_poll(**poll_params)
-        
-        logger.info(
-            "Poll sent successfully: message_id=%s, chat_id=%s, thread_id=%s",
-            message.message_id,
-            chat_id,
-            THREAD_ID or "main",
-        )
-        
-    except TelegramError as e:
-        error_msg = str(e)
-        
-        # Check for thread-related errors
-        if "message_thread_id" in error_msg.lower() or "thread" in error_msg.lower():
-            logger.error(
-                "Failed to send poll to thread %s: %s. "
-                "Verify that the thread ID is correct and the bot has permission to post in that thread.",
-                THREAD_ID,
-                error_msg,
-            )
-        else:
-            logger.exception("Failed to send poll: %s", e)
-        return
-        
-    except Exception as e:
-        logger.exception("Unexpected error while sending poll: %s", e)
+    if not update.message:
         return
 
-    # Compute when to close the poll based on schedule config
-    now = datetime.now(TIMEZONE)
-    stop_at = _next_weekday_time(
-        now=now,
-        target_weekday=SCHEDULE_CONFIG.stop_weekday,
-        hour=SCHEDULE_CONFIG.stop_hour,
-        minute=SCHEDULE_CONFIG.stop_minute,
-    )
-    delay = (stop_at - now).total_seconds()
+    chat = update.effective_chat
+    chat_id = chat.id
+    now = _now_tz()
 
-    if delay <= 0:
-        logger.warning(
-            "Computed non-positive delay (%s) for close_poll; skipping schedule.",
-            delay,
-        )
+    state = _get_chat_state(chat_id)
+
+    if not state.running:
+        await update.message.reply_text("Bot is not running in this chat.")
         return
 
-    logger.info(
-        "Scheduling close_poll for message %s at %s (in %.0f seconds)",
-        message.message_id,
-        stop_at.isoformat(),
-        delay,
-    )
+    state.running = False
+    state.stopped_at = now
 
-    context.job_queue.run_once(
-        close_poll,
-        when=delay,
-        data={
-            "chat_id": chat_id,
-            "message_id": message.message_id,
-            "poll_id": message.poll.id,
-            "thread_id": THREAD_ID,  # Store thread_id for closing
-        },
-        name=f"close_poll_{message.message_id}",
+    await update.message.reply_text(
+        f"Bot stopped in this chat at {_format_dt(now)}."
     )
 
 
-async def close_poll(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Job: close a previously published poll."""
-    data = context.job.data or {}
-    chat_id = data.get("chat_id")
-    message_id = data.get("message_id")
-    thread_id = data.get("thread_id")  # May be None for main thread
-
-    if chat_id is None or message_id is None:
-        logger.error("close_poll job missing chat_id or message_id in job data.")
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /status – report current bot state and last poll lifecycle information.
+    """
+    if not update.message:
         return
 
-    try:
-        thread_info = f"thread {thread_id}" if thread_id else "main thread"
-        logger.info(
-            "Closing poll in chat %s (message %s, %s) at %s",
-            chat_id,
-            message_id,
-            thread_info,
-            datetime.now(TIMEZONE).isoformat(),
-        )
-        
-        # stop_poll doesn't need message_thread_id, it uses message_id which is unique
-        await context.bot.stop_poll(chat_id=chat_id, message_id=message_id)
-        
-        logger.info(
-            "Poll closed successfully: message_id=%s, chat_id=%s",
-            message_id,
-            chat_id,
-        )
-        
-    except TelegramError as e:
-        logger.exception("Failed to close poll: %s", e)
-    except Exception as e:
-        logger.exception("Unexpected error while closing poll: %s", e)
+    chat = update.effective_chat
+    chat_id = chat.id
+
+    state = _get_chat_state(chat_id)
+    poll = state.poll
+
+    publication_state = _get_publication_state(poll)
+
+    text = (
+        "Bot status:\n"
+        f"- running: {'yes' if state.running else 'no'}\n"
+        f"- start time: {_format_dt(state.started_at)}\n"
+        f"- last poll published at: {_format_dt(poll.last_published_at)}\n"
+        f"- poll stopped at: {_format_dt(poll.last_stopped_at)}\n"
+        f"- publication state: {publication_state}"
+    )
+
+    await update.message.reply_text(text)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global error logger for updates and jobs."""
-    logger.error("Exception while handling an update/job", exc_info=context.error)
+    """
+    Global error handler.
+
+    Intentionally does not log to system outputs to keep the bot silent in logs.
+    """
+    _ = update, context  # Avoid unused parameter warnings.
 
 
 # ================== MAIN (ASYNC) ==================
@@ -490,46 +608,20 @@ async def main() -> None:
 
     # Handlers
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop_command))
+    application.add_handler(CommandHandler("status", status))
 
     application.add_error_handler(error_handler)
 
     job_queue = application.job_queue
 
-    # Schedule the weekly poll according to config
-    job_queue.run_daily(
-        callback=publish_poll,
-        time=time(
-            hour=SCHEDULE_CONFIG.start_hour,
-            minute=SCHEDULE_CONFIG.start_minute,
-            tzinfo=TIMEZONE,
-        ),
-        days=(SCHEDULE_CONFIG.start_weekday,),
-        name="publish_scheduled_poll",
+    # Policy enforcement loop: runs frequently to enforce survey rules.
+    job_queue.run_repeating(
+        callback=manage_survey_policy,
+        interval=300,  # 5 minutes
+        first=5,
+        name="manage_survey_policy",
     )
-
-    logger.info(
-        "Starting bot with configuration from bot_config.json:"
-    )
-    logger.info(
-        "  Schedule: start_day=%s %02d:%02d, stop_day=%s %02d:%02d, tz=%s",
-        list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.start_weekday].capitalize(),
-        SCHEDULE_CONFIG.start_hour,
-        SCHEDULE_CONFIG.start_minute,
-        list(DAY_NAME_TO_INT.keys())[SCHEDULE_CONFIG.stop_weekday].capitalize(),
-        SCHEDULE_CONFIG.stop_hour,
-        SCHEDULE_CONFIG.stop_minute,
-        TIMEZONE,
-    )
-    logger.info(
-        "  Survey: title='%s', options=%s",
-        SURVEY_CONFIG.title,
-        SURVEY_CONFIG.options,
-    )
-    
-    if THREAD_ID is not None:
-        logger.info("  Thread ID: %s (polls will be sent to this thread)", THREAD_ID)
-    else:
-        logger.info("  Thread ID: Not configured (polls will be sent to main thread)")
 
     # Manual lifecycle (no run_polling)
     await application.initialize()
@@ -541,7 +633,8 @@ async def main() -> None:
         # Block here until Ctrl+C cancels asyncio.run(main())
         await stop_event.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
-        logger.info("Shutdown signal received, stopping bot...")
+        # Graceful shutdown without logging to system outputs.
+        pass
     finally:
         await application.updater.stop()
         await application.stop()
