@@ -418,3 +418,23 @@ Remove-Item -Recurse -Force "C:\Telegram_Weekly_Poll_Bot"
 - **Remove (Linux)**: `systemctl stop/disable`, delete service file, then `rm -rf` the project directory.
 - **Remove (Windows)**: disable/delete the scheduled task, then delete the project folder.
 
+### 6. Troubleshooting
+
+#### `telegram.error.TimedOut` or `httpcore.ConnectTimeout`
+
+This means the server could not reach Telegram’s API (`api.telegram.org`) in time. Common causes:
+
+- **Firewall or proxy** blocking outbound HTTPS (port 443) to Telegram.
+- **DNS** not resolving `api.telegram.org`.
+- **Network or ISP** restrictions (e.g. some datacentres or countries limit access to Telegram).
+
+**Checks on the server:**
+
+```bash
+# Test connectivity and DNS
+curl -v --connect-timeout 10 https://api.telegram.org
+
+# If you use a proxy, configure it for the bot (see bot code / HTTPXRequest proxy options).
+```
+
+If `curl` also times out or fails, fix network/firewall/DNS or use a proxy before running the bot. The bot is configured with 30-second connect/read/write timeouts; if the network is very slow or blocked, increase them in `bot.py` or ensure the server can reach Telegram.
