@@ -9,6 +9,7 @@ from typing import Optional
 
 from telegram import Update, Poll
 from telegram.error import TelegramError
+from telegram.request import HTTPXRequest
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -600,9 +601,16 @@ async def main() -> None:
 
     The survey content and schedule are entirely driven by bot_config.json.
     """
+    # Use longer timeouts so the bot can connect on slow or restricted networks.
+    request = HTTPXRequest(
+        connect_timeout=30.0,
+        read_timeout=30.0,
+        write_timeout=30.0,
+    )
     application = (
         Application.builder()
         .token(TELEGRAM_BOT_TOKEN)
+        .request(request)
         .build()
     )
 
