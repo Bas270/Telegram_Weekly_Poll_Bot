@@ -417,6 +417,7 @@ Remove-Item -Recurse -Force "C:\Telegram_Weekly_Poll_Bot"
 - **Windows autostart**: create a Task Scheduler entry pointing to `venv\Scripts\python.exe bot.py`.
 - **Remove (Linux)**: `systemctl stop/disable`, delete service file, then `rm -rf` the project directory.
 - **Remove (Windows)**: disable/delete the scheduled task, then delete the project folder.
+--
 
 ### 6. Troubleshooting
 
@@ -435,6 +436,53 @@ This means the server could not reach Telegram’s API (`api.telegram.org`) in t
 curl -v --connect-timeout 10 https://api.telegram.org
 
 # If you use a proxy, configure it for the bot (see bot code / HTTPXRequest proxy options).
+```
+
+If `curl` also times out or fails, fix network/firewall/DNS or use a proxy before running the bot. The bot is configured with 30-second connect/read/write timeouts; if the network is very slow or blocked, increase them in `bot.py` or ensure the server can reach Telegram.
+
+#### Bot does not respond to commands (/start, /stop, /status)
+
+If the bot runs without errors but does not reply to commands in Telegram:
+
+1. **Only one instance**  
+   Ensure a single process is running. Multiple processes with the same token share updates; only one will receive each update.
+   ```bash
+   pgrep -af "bot.py"
+   ```
+   If you see more than one line, stop the extra process(es) (e.g. `kill <PID>` or `systemctl stop ...`).
+
+2. **Bot is in the chat**  
+   - **Groups**: Add the bot to the group (Invite → search by bot username).  
+   - **Private chat**: Open the bot in Telegram and tap **Start** (or send `/start`) so the conversation exists.
+
+3. **Same bot and token**  
+   The token in `vault.json` must belong to the bot you are messaging. Check with [@BotFather](https://t.me/BotFather): `/mybots` → select the bot → API Token. It must match `TELEGRAM_BOT_TOKEN` exactly (no extra spaces or quotes inside the string).
+
+4. **Test in private chat first**  
+   Send `/start` in a **private chat** with the bot. If it replies there but not in a group, the group likely has **Privacy Mode** enabled: in BotFather → Bot Settings → Group Privacy, turn it **Off** so the bot receives all messages in groups, or ensure commands are sent in a form the bot receives (e.g. `/start` at the start of the message).
+
+5. **Confirm the process is polling**  
+   After starting the bot, it should run without exiting. If it exits immediately, check the traceback. If it runs but never receives updates, run a connectivity check (see “Timed out” above) and ensure no firewall blocks outbound HTTPS to `api.telegram.org`.
+
+6. **Temporary logging (optional)**  
+   To see whether updates and handlers run, you can temporarily enable logging in `bot.py` before `application.add_error_handler(...)`:
+   ```python
+   import logging
+   logging.basicConfig(level=logging.DEBUG)
+   logging.getLogger("telegram").setLevel(logging.INFO)
+   ```
+   Restart the bot, send a command, and watch the terminal for incoming updates and any handler errors. Remove or comment out these lines when done.
+
+#### Stopping and restarting the bot
+
+- **Running manually in a terminal**  
+  **Ctrl+C** is the correct way to stop. The bot catches the interrupt and shuts down the updater and connection cleanly. To restart, run `python bot.py` again in the same (or a new) terminal with the venv activated.
+
+- **Running as a systemd service**  
+  Stop: `sudo systemctl stop telegram-bot-poll.service`  
+  Start: `sudo systemctl start telegram-bot-poll.service`  
+  Restart: `sudo systemctl restart telegram-bot-poll.service`  
+  Do not rely on Ctrl+C when the bot is in the background; use `systemctl` so the service state stays correct.
 ```
 
 If `curl` also times out or fails, fix network/firewall/DNS or use a proxy before running the bot. The bot is configured with 30-second connect/read/write timeouts; if the network is very slow or blocked, increase them in `bot.py` or ensure the server can reach Telegram.
