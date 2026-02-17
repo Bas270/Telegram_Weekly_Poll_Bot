@@ -136,6 +136,22 @@ Example configuration:
   - `SCHEDULE_CONFIG` – start/stop days and times
   - `TIMEZONE` – used for all date/time logic
 
+#### 2.3. When configuration changes take effect
+
+The bot reads `vault.json` and `bot_config.json` **once at process start**. It does **not** reload them while it is running.
+
+| File | Read when | When changes apply |
+|------|-----------|--------------------|
+| `vault.json` | Once at startup | **Only after restarting the bot** |
+| `bot_config.json` | Once at startup | **Only after restarting the bot** |
+
+If you edit either file (e.g. with `nano`) while the bot is running, the new values will **not** be used until you restart the process:
+
+- **Running as a systemd service:**  
+  `sudo systemctl restart telegram-bot-poll.service`
+- **Running manually in a terminal:**  
+  Stop the bot with **Ctrl+C**, then start it again with `python bot.py`.
+
 ---
 
 ### 3. Running the Bot
