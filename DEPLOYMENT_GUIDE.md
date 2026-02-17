@@ -216,7 +216,20 @@ pip install -r requirements.txt
 
 Ensure `vault.json` and `bot_config.json` are present and correctly configured in `/opt/Telegram_Weekly_Poll_Bot`.
 
-#### 3.4.2. Create a systemd service unit
+#### 3.4.2. Install the systemd service unit
+
+**Option A: Copy the unit from the project (recommended)**
+
+The repository includes a ready-made unit file. From the project directory (e.g. `/opt/Telegram_Weekly_Poll_Bot`):
+
+```bash
+sudo cp /opt/Telegram_Weekly_Poll_Bot/telegram-bot-poll.service /etc/systemd/system/telegram-bot-poll.service
+sudo systemctl daemon-reload
+```
+
+Adjust the first path if your bot lives elsewhere (e.g. `/root/Telegram_Weekly_Poll_Bot`). The unit file in the repo uses `/opt/Telegram_Weekly_Poll_Bot`; edit `/etc/systemd/system/telegram-bot-poll.service` if your path is different.
+
+**Option B: Create the unit file manually**
 
 Create `/etc/systemd/system/telegram-bot-poll.service`:
 
@@ -224,7 +237,7 @@ Create `/etc/systemd/system/telegram-bot-poll.service`:
 sudo nano /etc/systemd/system/telegram-bot-poll.service
 ```
 
-Example content:
+Paste the following (adjust paths and `User` if needed):
 
 ```ini
 [Unit]
@@ -417,7 +430,8 @@ Remove-Item -Recurse -Force "C:\Telegram_Weekly_Poll_Bot"
 - **Windows autostart**: create a Task Scheduler entry pointing to `venv\Scripts\python.exe bot.py`.
 - **Remove (Linux)**: `systemctl stop/disable`, delete service file, then `rm -rf` the project directory.
 - **Remove (Windows)**: disable/delete the scheduled task, then delete the project folder.
---
+
+---
 
 ### 6. Troubleshooting
 
@@ -482,7 +496,5 @@ If the bot runs without errors but does not reply to commands in Telegram:
   Stop: `sudo systemctl stop telegram-bot-poll.service`  
   Start: `sudo systemctl start telegram-bot-poll.service`  
   Restart: `sudo systemctl restart telegram-bot-poll.service`  
-  Do not rely on Ctrl+C when the bot is in the background; use `systemctl` so the service state stays correct.
-```
-
-If `curl` also times out or fails, fix network/firewall/DNS or use a proxy before running the bot. The bot is configured with 30-second connect/read/write timeouts; if the network is very slow or blocked, increase them in `bot.py` or ensure the server can reach Telegram.
+  Do not rely on Ctrl+C when the bot is in the background; use `systemctl` so the service state stays correct.  
+  If you see **Unit telegram-bot-poll.service not found**, install the service file first (see **§3.4.2**): copy `telegram-bot-poll.service` to `/etc/systemd/system/`, then run `sudo systemctl daemon-reload` before starting.
